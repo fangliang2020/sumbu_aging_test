@@ -126,22 +126,23 @@ void can_receive_task(void *pvParameters)
                     //ESP_LOGD(TAG, "r_cur_steps: %d,r_pre_steps =%d", motor_params_.r_cur_steps, motor_params_.r_pre_steps);
                     motor_params_.r_pre_steps = temp_step;
                 }
-                else if (rx_message.identifier == 0x352) // 左电机
-                {
-                    uint8_t temp_step = rx_message.data[1];
-                    if (temp_step >= motor_params_.l_pre_steps)
-                        motor_params_.l_cur_steps += temp_step - motor_params_.l_pre_steps;
-                    else
-                        motor_params_.l_cur_steps += 255 - motor_params_.l_pre_steps + temp_step;
-                    // char addr_str[10] = {0};
-                    // sprintf(addr_str, "%02X:%02X", rx_message.data[0], rx_message.data[1]);
-                    //ESP_LOGD(TAG, "l_cur_steps: %d,l_pre_steps =%d", motor_params_.l_cur_steps, motor_params_.l_pre_steps);
-                    motor_params_.l_pre_steps = temp_step;
-                }
+                // else if (rx_message.identifier == 0x352) // 左电机
+                // {
+                //     uint8_t temp_step = rx_message.data[1];
+                //     if (temp_step >= motor_params_.l_pre_steps)
+                //         motor_params_.l_cur_steps += temp_step - motor_params_.l_pre_steps;
+                //     else
+                //         motor_params_.l_cur_steps += 255 - motor_params_.l_pre_steps + temp_step;
+                //     // char addr_str[10] = {0};
+                //     // sprintf(addr_str, "%02X:%02X", rx_message.data[0], rx_message.data[1]);
+                //     //ESP_LOGD(TAG, "l_cur_steps: %d,l_pre_steps =%d", motor_params_.l_cur_steps, motor_params_.l_pre_steps);
+                //     motor_params_.l_pre_steps = temp_step;
+                // }
                 else
                 {
                 }
-                total_steps = motor_params_.l_cur_steps + motor_params_.r_cur_steps;
+                total_steps = motor_params_.r_cur_steps;
+                // ESP_LOGD(TAG, "%d",total_steps);
                 jibu_flag = 1;
                 break;
             case 0x12: // 要求输入标定数据
@@ -318,10 +319,11 @@ void task_motor_comm(void *args)
 
         if (sync_bits & MOTOR_START) // 开始运行
         {
+            total_steps =0;
             senddata[0] = 0x08;
             length = 1;
             uint8_t response_data[8] = {0};
-
+            memset(&motor_params_,0,sizeof(motor_params_));
             esp_err_t result = can_send_with_response(
                 comm,
                 MASTER_TO_SLAVE_LEFT,              // 请求ID

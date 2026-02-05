@@ -7,6 +7,15 @@
 #include "driver/uart.h"
 #include "can_comm.h"
 #include "esp_log.h"
+#include "driver/gpio.h"
+#include "driver/ledc.h"
+
+#define PWM_PIN 2
+#define PWM_CHANNEL LEDC_CHANNEL_1
+#define PWM_TIMER LEDC_TIMER_1
+#define POWER_EN 2       // 3.3V 电源键导通
+
+
 
 static const char *TAG = "uart_events";
 
@@ -63,6 +72,7 @@ static void cmd_parse_qt(uint8_t *buf)
     switch (command)
     {
     case 0x01: // 启动
+        total_steps =0;
         // can发送启动命令
         xEventGroupSetBits(sync_event, MOTOR_START);
         break;
@@ -100,7 +110,7 @@ static void uart_event_task(void *pvParameters)
                 ESP_LOGD(TAG, "[DATA EVT]:");
                 cmd_parse_qt(dtmp);
 
-                    uart_write_bytes(EX_UART_NUM, (const char *)dtmp, event.size);
+                // uart_write_bytes(EX_UART_NUM, (const char *)dtmp, event.size);
                 break;
             // Event of HW FIFO overflow detected
             case UART_FIFO_OVF:
@@ -159,8 +169,7 @@ static void uart_event_task(void *pvParameters)
                 break;
             }
         }
-        ESP_LOGD(TAG, "for down !!!");
-        if (jibu_flag) //有计步信息
+        if (jibu_flag) // 有计步信息
         {
             jibu_flag = 0;
             uint8_t data[8] = {0};
@@ -184,11 +193,80 @@ static void uart_event_task(void *pvParameters)
     dtmp = NULL;
     vTaskDelete(NULL);
 }
+static volatile bool ledc_fade_done = false;
 
+// LEDC渐变完成中断处理函数（ESP-IDF v4.4+ 版本）
+static bool IRAM_ATTR ledc_fade_end_callback(const ledc_cb_param_t *param, void *user_arg)
+{
+    if (param->event == LEDC_FADE_END_EVT)
+    {
+        ledc_fade_done = true;
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, PWM_CHANNEL, 8191);
+        ledc_update_duty(LEDC_LOW_SPEED_MODE, PWM_CHANNEL);
+    }
+    return false; // 返回false表示不从中断服务程序返回值
+}
+void power_en_init()
+{
+    // gpio_config_t io_conf = {
+    //     .pin_bit_mask = (1ULL << POWER_EN),
+    //     .mode = GPIO_MODE_OUTPUT,
+    //     // 禁用上拉
+    //     .pull_up_en = GPIO_PULLUP_DISABLE,
+    //     // 禁用下拉
+    //     .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    //     // 禁用中断
+    //     .intr_type = GPIO_INTR_DISABLE,
+    // };
+    // gpio_config(&io_conf);
+    // gpio_set_level(POWER_EN, 0);
+    ESP_LOGD(TAG, "使用LEDC渐变中断控制\n");
+
+    // 1. 配置PWM
+    ledc_timer_config_t timer_config = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .timer_num = PWM_TIMER,
+        .duty_resolution = LEDC_TIMER_13_BIT,
+        .freq_hz = 1000,
+        .clk_cfg = LEDC_AUTO_CLK};
+    ledc_timer_config(&timer_config);
+
+    ledc_channel_config_t channel_config = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = PWM_CHANNEL,
+        .timer_sel = PWM_TIMER,
+        .intr_type = LEDC_INTR_FADE_END, // 启用渐变结束中断
+        .gpio_num = PWM_PIN,
+        .duty = 0,
+        .hpoint = 0};
+    ledc_channel_config(&channel_config);
+
+    // 2. 初始化渐变功能并注册回调
+    ledc_fade_func_install(0);
+
+    // 注册回调函数
+    ledc_cbs_t callbacks = {
+        .fade_cb = ledc_fade_end_callback};
+    ledc_cb_register(LEDC_LOW_SPEED_MODE, PWM_CHANNEL, &callbacks, NULL);
+}
+
+void power_3v_on()
+{
+    ESP_LOGD(TAG, "启动1秒PWM渐变\n");
+    ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, PWM_CHANNEL, 8191, 1000);
+    ledc_fade_start(LEDC_LOW_SPEED_MODE, PWM_CHANNEL, LEDC_FADE_NO_WAIT);
+    // 4. 等待渐变完成中断
+    while (!ledc_fade_done)
+    {
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+    // gpio_set_level(POWER_EN, 1);
+}
 void app_main(void)
 {
     esp_log_level_set(TAG, ESP_LOG_INFO);
-
+    power_en_init();
+    power_3v_on();
     /* Configure parameters of an UART driver,
      * communication pins and install the driver */
     uart_config_t uart_config = {
@@ -204,7 +282,6 @@ void app_main(void)
     uart_param_config(EX_UART_NUM, &uart_config);
 
     // Set UART log level
-    esp_log_level_set(TAG, ESP_LOG_INFO);
     // Set UART pins (using UART0 default pins ie no changes.)
     uart_set_pin(EX_UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
@@ -215,7 +292,7 @@ void app_main(void)
 
     // Create a task to handler UART event from ISR
     xTaskCreate(uart_event_task, "uart_event_task", 3072, NULL, 3, NULL);
-    xTaskCreate(task_motor_comm, "task_motor_comm", 8012, NULL, 4, NULL);
+    xTaskCreate(task_motor_comm, "task_motor_comm", 4096, NULL, 2, NULL);
 }
 
 void vApplicationIdleHook(void)
